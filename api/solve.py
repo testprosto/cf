@@ -1,12 +1,12 @@
 import os
 import time
-from typing import Optional, Dict
+from typing import Optional
 from dataclasses import dataclass
 from urllib.parse import unquote
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 
 app = FastAPI()
 
@@ -34,22 +34,14 @@ class TurnstileSolver:
         if self.debug:
             print(f"[DEBUG] {msg}")
 
-    def _launch(self, playwright):
-        args = [
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-        ]
-        return playwright.chromium.launch(headless=self.headless, args=args)
-
-    def _wait_for_turnstile(self, page, timeout=10) -> Optional[str]:
+    async def _wait_for_turnstile(self, page, timeout=10):
         """
         Wait for Turnstile token to appear
         """
         end = time.time() + timeout
         while time.time() < end:
             try:
-                token = page.evaluate(
+                token = await page.evaluate(
                     """() => {
                         const el = document.querySelector(
                             'input[name="cf-turnstile-response"]'
@@ -61,30 +53,35 @@ class TurnstileSolver:
                     return token
             except:
                 pass
-            time.sleep(0.3)
+            await page.wait_for_timeout(300)
         return None
 
-    def solve(self, url: str, cookies: dict = None) -> TurnstileResult:
+    async def solve(self, url: str, cookies: dict = None) -> TurnstileResult:
         start = time.time()
         try:
-            with sync_playwright() as p:
-                browser = self._launch(p)
-                context = browser.new_context(
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=self.headless,
+                    args=["--disable-blink-features=AutomationControlled",
+                          "--no-sandbox",
+                          "--disable-dev-shm-usage"]
+                )
+                context = await browser.new_context(
                     user_agent=self.useragent,
                     viewport={"width": 1280, "height": 900}
                 )
                 if cookies:
                     domain = url.split("//")[1].split("/")[0]
-                    context.add_cookies([
+                    await context.add_cookies([
                         {"name": k, "value": str(v), "domain": domain, "path": "/"}
                         for k, v in cookies.items()
                     ])
-                page = context.new_page()
-                page.goto(url, wait_until="domcontentloaded")
+                page = await context.new_page()
+                await page.goto(url, wait_until="domcontentloaded")
                 self._debug("Page loaded, waiting for Turnstile...")
-                token = self._wait_for_turnstile(page)
+                token = await self._wait_for_turnstile(page)
                 elapsed = round(time.time() - start, 3)
-                browser.close()
+                await browser.close()
                 if not token:
                     return TurnstileResult(
                         None,
@@ -118,6 +115,6 @@ async def solve_turnstile(request: Request):
     url = unquote(url)
 
     solver = TurnstileSolver(headless=True, debug=True)
-    result = solver.solve(url)
+    result = await solver.solve(url)
 
     return JSONResponse(result.__dict__)
