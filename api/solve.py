@@ -1,20 +1,26 @@
 import os
 import time
-from typing import Optional
 from dataclasses import dataclass
+from typing import Optional
 from urllib.parse import unquote
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from playwright.async_api import async_playwright, Playwright
+from playwright.async_api import async_playwright
 
 app = FastAPI()
 
+# ================= ENV =================
 BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN")
-if not BROWSERLESS_TOKEN:
-    raise Exception("Set BROWSERLESS_TOKEN in Vercel environment variables")
 
-# ================= DATA ==================
+if not BROWSERLESS_TOKEN:
+    raise RuntimeError("BROWSERLESS_TOKEN not set")
+
+BROWSERLESS_WS = (
+    f"wss://chrome.browserless.io/playwright?token={BROWSERLESS_TOKEN}"
+)
+
+# ================= DATA =================
 @dataclass
 class TurnstileResult:
     turnstile_value: Optional[str]
@@ -24,15 +30,14 @@ class TurnstileResult:
 
 # ================= SOLVER =================
 class TurnstileSolver:
-
     def __init__(self, debug=False):
         self.debug = debug
 
-    def _debug(self, msg):
+    def log(self, msg):
         if self.debug:
-            print(f"[DEBUG] {msg}")
+            print("[DEBUG]", msg)
 
-    async def _wait_for_turnstile(self, page, timeout=10):
+    async def wait_for_turnstile(self, page, timeout=10):
         end = time.time() + timeout
         while time.time() < end:
             try:
@@ -51,14 +56,12 @@ class TurnstileSolver:
             await page.wait_for_timeout(300)
         return None
 
-    async def solve(self, url: str):
+    async def solve(self, url: str) -> TurnstileResult:
         start = time.time()
         try:
-            # Connect to Browserless Cloud
             async with async_playwright() as p:
-                browser = await p.chromium.connect_over_cdp(
-                    f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}"
-                )
+                browser = await p.chromium.connect(BROWSERLESS_WS)
+
                 context = await browser.new_context(
                     user_agent=(
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -67,28 +70,40 @@ class TurnstileSolver:
                     ),
                     viewport={"width": 1280, "height": 900}
                 )
+
                 page = await context.new_page()
                 await page.goto(url, wait_until="domcontentloaded")
-                self._debug("Page loaded, waiting for Turnstile...")
-                token = await self._wait_for_turnstile(page)
+
+                self.log("Waiting for Turnstile token")
+                token = await self.wait_for_turnstile(page)
+
                 elapsed = round(time.time() - start, 3)
                 await browser.close()
+
                 if not token:
                     return TurnstileResult(
-                        None, elapsed, "failure", "Turnstile token not detected"
+                        None, elapsed, "failure", "Turnstile not detected"
                     )
-                return TurnstileResult(token, elapsed, "success")
-        except Exception as e:
-            return TurnstileResult(None, round(time.time() - start, 3), "error", str(e))
 
-# ================= API ENDPOINT =================
+                return TurnstileResult(token, elapsed, "success")
+
+        except Exception as e:
+            return TurnstileResult(
+                None,
+                round(time.time() - start, 3),
+                "error",
+                str(e)
+            )
+
+# ================= API =================
 @app.get("/solve")
 async def solve_turnstile(request: Request):
     url = request.query_params.get("url")
-    sitekey = request.query_params.get("sitekey")  # legacy
 
     if not url:
-        return JSONResponse({"error": "Missing 'url' parameter"}, status_code=400)
+        return JSONResponse(
+            {"error": "Missing url parameter"}, status_code=400
+        )
 
     url = unquote(url)
 
