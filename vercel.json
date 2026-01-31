@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/main.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/solve",
+      "methods": ["GET"],
+      "dest": "api/main.py"
+    }
+  ]
+}
