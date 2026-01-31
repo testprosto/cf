@@ -12,13 +12,11 @@ app = FastAPI()
 
 # ================= ENV =================
 BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN")
-
 if not BROWSERLESS_TOKEN:
-    raise RuntimeError("BROWSERLESS_TOKEN not set")
+    raise RuntimeError("Set BROWSERLESS_TOKEN in Vercel environment variables")
 
-BROWSERLESS_WS = (
-    f"wss://chrome.browserless.io/playwright?token={BROWSERLESS_TOKEN}"
-)
+# Correct WebSocket URL
+BROWSERLESS_WS = f"wss://chrome.browserless.io/playwright?token={BROWSERLESS_TOKEN}"
 
 # ================= DATA =================
 @dataclass
@@ -56,10 +54,11 @@ class TurnstileSolver:
             await page.wait_for_timeout(300)
         return None
 
-    async def solve(self, url: str) -> TurnstileResult:
+    async def solve(self, url: str):
         start = time.time()
         try:
             async with async_playwright() as p:
+                # Connect to Browserless using correct URL with token
                 browser = await p.chromium.connect(BROWSERLESS_WS)
 
                 context = await browser.new_context(
@@ -81,29 +80,19 @@ class TurnstileSolver:
                 await browser.close()
 
                 if not token:
-                    return TurnstileResult(
-                        None, elapsed, "failure", "Turnstile not detected"
-                    )
+                    return TurnstileResult(None, elapsed, "failure", "Turnstile not detected")
 
                 return TurnstileResult(token, elapsed, "success")
 
         except Exception as e:
-            return TurnstileResult(
-                None,
-                round(time.time() - start, 3),
-                "error",
-                str(e)
-            )
+            return TurnstileResult(None, round(time.time() - start, 3), "error", str(e))
 
 # ================= API =================
 @app.get("/solve")
 async def solve_turnstile(request: Request):
     url = request.query_params.get("url")
-
     if not url:
-        return JSONResponse(
-            {"error": "Missing url parameter"}, status_code=400
-        )
+        return JSONResponse({"error": "Missing url parameter"}, status_code=400)
 
     url = unquote(url)
 
