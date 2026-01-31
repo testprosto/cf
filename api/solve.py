@@ -6,9 +6,13 @@ from urllib.parse import unquote
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Playwright
 
 app = FastAPI()
+
+BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN")
+if not BROWSERLESS_TOKEN:
+    raise Exception("Set BROWSERLESS_TOKEN in Vercel environment variables")
 
 # ================= DATA ==================
 @dataclass
@@ -21,13 +25,7 @@ class TurnstileResult:
 # ================= SOLVER =================
 class TurnstileSolver:
 
-    def __init__(self, headless=True, useragent=None, debug=False):
-        self.headless = headless
-        self.useragent = useragent or (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        )
+    def __init__(self, debug=False):
         self.debug = debug
 
     def _debug(self, msg):
@@ -35,9 +33,6 @@ class TurnstileSolver:
             print(f"[DEBUG] {msg}")
 
     async def _wait_for_turnstile(self, page, timeout=10):
-        """
-        Wait for Turnstile token to appear
-        """
         end = time.time() + timeout
         while time.time() < end:
             try:
@@ -56,26 +51,22 @@ class TurnstileSolver:
             await page.wait_for_timeout(300)
         return None
 
-    async def solve(self, url: str, cookies: dict = None) -> TurnstileResult:
+    async def solve(self, url: str):
         start = time.time()
         try:
+            # Connect to Browserless Cloud
             async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=self.headless,
-                    args=["--disable-blink-features=AutomationControlled",
-                          "--no-sandbox",
-                          "--disable-dev-shm-usage"]
+                browser = await p.chromium.connect_over_cdp(
+                    f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}"
                 )
                 context = await browser.new_context(
-                    user_agent=self.useragent,
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
                     viewport={"width": 1280, "height": 900}
                 )
-                if cookies:
-                    domain = url.split("//")[1].split("/")[0]
-                    await context.add_cookies([
-                        {"name": k, "value": str(v), "domain": domain, "path": "/"}
-                        for k, v in cookies.items()
-                    ])
                 page = await context.new_page()
                 await page.goto(url, wait_until="domcontentloaded")
                 self._debug("Page loaded, waiting for Turnstile...")
@@ -84,37 +75,24 @@ class TurnstileSolver:
                 await browser.close()
                 if not token:
                     return TurnstileResult(
-                        None,
-                        elapsed,
-                        "failure",
-                        "Turnstile token not detected"
+                        None, elapsed, "failure", "Turnstile token not detected"
                     )
                 return TurnstileResult(token, elapsed, "success")
         except Exception as e:
-            return TurnstileResult(
-                None,
-                round(time.time() - start, 3),
-                "error",
-                str(e)
-            )
+            return TurnstileResult(None, round(time.time() - start, 3), "error", str(e))
 
 # ================= API ENDPOINT =================
 @app.get("/solve")
 async def solve_turnstile(request: Request):
-    """
-    Example usage:
-    https://your-vercel-url/solve?url=https%3A%2F%2Fexample.com&sitekey=123
-    """
     url = request.query_params.get("url")
-    sitekey = request.query_params.get("sitekey")  # legacy, unused but kept
+    sitekey = request.query_params.get("sitekey")  # legacy
 
     if not url:
         return JSONResponse({"error": "Missing 'url' parameter"}, status_code=400)
 
-    # decode url if encoded
     url = unquote(url)
 
-    solver = TurnstileSolver(headless=True, debug=True)
+    solver = TurnstileSolver(debug=True)
     result = await solver.solve(url)
 
     return JSONResponse(result.__dict__)
